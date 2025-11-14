@@ -398,7 +398,10 @@ def mcp_status():
         "tools_available": len(tools),
         "tools": [t["name"] for t in tools]
     })
-
+@app.route("/")
+def home():
+    user = session.get("mcp_user")
+    return render_template("index.html", user=user)
 
 # ============================================================
 # MAIN
