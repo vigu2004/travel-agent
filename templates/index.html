@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Travel Agent - AI Assistant</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <!-- Login Modal (outside container so it's not affected by pointer-events) -->
+    <div class="login-modal" id="login-modal">
+        <div class="login-content">
+            <h2>🔐 Login Required</h2>
+            <p>Please log in with your email and password to use the Travel Agent</p>
+            <form id="login-form">
+                <div class="form-group">
+                    <label for="email">Email:</label>
+                    <input type="email" id="email" name="email" placeholder="user@gmail.com" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password:</label>
+                    <input type="password" id="password" name="password" placeholder="Enter your password" required>
+                </div>
+                <div id="login-error" class="error-message" style="display: none;"></div>
+                <button type="submit" class="login-btn">Login</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>✈️ Travel Agent AI</h1>
+            <div class="status-bar">
+                <span class="status" id="status">
+                    <span class="dot"></span>
+                    <span id="status-text">Connecting...</span>
+                </span>
+                <span class="mcp-server" id="mcp-server">MCP: Checking...</span>
+                <button id="logout-btn" class="logout-btn" style="display: none;">Logout</button>
+            </div>
+        </div>
+
+        <!-- Capabilities Panel -->
+        <div class="capabilities-panel" id="capabilities-panel">
+            <h3>🛠️ What I Can Do</h3>
+            <div class="capabilities-grid" id="capabilities-grid">
+                <div class="capability-card loading">
+                    <div class="capability-icon">🔄</div>
+                    <div class="capability-name">Loading...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chat Container -->
+        <div class="chat-container" id="chat-container">
+            <div class="welcome-message">
+                <h2>👋 Welcome to Travel Agent AI</h2>
+                <p>I can help you search for flights, hotels, and car rentals. Just ask me anything!</p>
+                <div class="example-queries">
+                    <p><strong>Try asking:</strong></p>
+                    <ul>
+                        <li>"Find flights from New York to London"</li>
+                        <li>"Show me hotels in Tokyo"</li>
+                        <li>"I need a car rental in Dubai"</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Input Area -->
+        <div class="input-container">
+            <div class="input-wrapper">
+                <textarea 
+                    id="user-input" 
+                    placeholder="Type your message here... (Press Enter to send, Shift+Enter for new line)"
+                    rows="1"
+                ></textarea>
+                <button id="send-btn" class="send-btn" title="Send message">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                        <path d="M22 2L11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
+
