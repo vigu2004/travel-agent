@@ -138,8 +138,8 @@ async def _mcp_request(client, method, params, token, session_id=None):
     if session_id:
         headers["mcp-session-id"] = session_id
     
-    # Try JSON request first (most common)
     try:
+        # Make request expecting JSON response
         response = await client.post(
             f"{MCP_SERVER_URL}/mcp",
             json=payload,
@@ -151,48 +151,68 @@ async def _mcp_request(client, method, params, token, session_id=None):
         # Check content type
         content_type = response.headers.get("content-type", "").lower()
         
-        if "application/json" in content_type:
+        # Handle JSON response (most common)
+        if "application/json" in content_type or not content_type:
             data = response.json()
             if "result" in data:
                 return data["result"]
             elif "error" in data:
-                raise Exception(f"MCP Error: {data['error']}")
+                error_info = data["error"]
+                if isinstance(error_info, dict):
+                    error_msg = error_info.get("message", str(error_info))
+                else:
+                    error_msg = str(error_info)
+                raise Exception(f"MCP Error: {error_msg}")
             return data
         
+        # Handle SSE response (less common)
         elif "text/event-stream" in content_type:
-            # Handle SSE response - need to reconnect for SSE
-            try:
-                async with httpx_sse.aconnect_sse(
-                    client, "POST", f"{MCP_SERVER_URL}/mcp",
-                    json=payload, headers=headers
-                ) as stream:
-                    async for event in stream.aiter_sse():
-                        if event.event == "message":
-                            data = json.loads(event.data)
-                            if "result" in data:
-                                return data["result"]
-                            elif "error" in data:
-                                raise Exception(f"MCP Error: {data['error']}")
-                            return data
-            except httpx_sse.SSEError as sse_err:
-                # If SSE fails, fall back to trying JSON again
-                raise Exception(f"SSE Error: {sse_err}")
+            # For SSE, we need to make a new request with SSE handler
+            # Close the current response
+            await response.aclose()
+            
+            async with httpx_sse.aconnect_sse(
+                client, "POST", f"{MCP_SERVER_URL}/mcp",
+                json=payload, headers=headers
+            ) as stream:
+                async for event in stream.aiter_sse():
+                    if event.event == "message":
+                        data = json.loads(event.data)
+                        if "result" in data:
+                            return data["result"]
+                        elif "error" in data:
+                            error_info = data["error"]
+                            if isinstance(error_info, dict):
+                                error_msg = error_info.get("message", str(error_info))
+                            else:
+                                error_msg = str(error_info)
+                            raise Exception(f"MCP Error: {error_msg}")
+                        return data
+        else:
+            raise Exception(f"Unexpected content type: {content_type}")
+            
     except httpx.HTTPStatusError as http_err:
         # If HTTP error, try to parse JSON error response
         try:
             error_data = http_err.response.json()
             if "error" in error_data:
-                raise Exception(f"MCP HTTP Error: {error_data['error']}")
-        except:
+                error_info = error_data["error"]
+                if isinstance(error_info, dict):
+                    error_msg = error_info.get("message", str(error_info))
+                else:
+                    error_msg = str(error_info)
+                raise Exception(f"MCP HTTP Error ({http_err.response.status_code}): {error_msg}")
+        except ValueError:
+            # Not JSON
             pass
-        raise Exception(f"HTTP Error: {http_err}")
+        raise Exception(f"HTTP Error ({http_err.response.status_code}): {http_err.response.text[:200]}")
+    except httpx_sse.SSEError as sse_err:
+        raise Exception(f"SSE Error: {sse_err}")
     except Exception as e:
         # Re-raise if it's already our custom exception
-        if "MCP Error" in str(e) or "SSE Error" in str(e):
+        if "Error:" in str(e):
             raise
         raise Exception(f"Request failed: {str(e)}")
-    
-    raise Exception("Unexpected response format")
 
 
 async def mcp_initialize(client, token):
@@ -200,12 +220,16 @@ async def mcp_initialize(client, token):
     params = {
         "protocolVersion": "2024-11-05",
         "capabilities": {},
-        "clientInfo": {"name": "math-agent", "version": "1.0.0"}
+        "clientInfo": {"name": "travel-agent", "version": "1.0.0"}
     }
-    result = await _mcp_request(client, "initialize", params, token)
-    # MCP initialize returns serverInfo, but we might also get session info
-    # Return the full result to allow access to any session identifiers
-    return result if isinstance(result, dict) else {"serverInfo": result}
+    try:
+        result = await _mcp_request(client, "initialize", params, token)
+        # MCP initialize returns serverInfo, but we might also get session info
+        # Return the full result to allow access to any session identifiers
+        return result if isinstance(result, dict) else {"serverInfo": result}
+    except Exception as e:
+        print(f"Initialize error: {e}")
+        raise
 
 
 async def mcp_list_tools(client, token, session_id=None):
@@ -251,6 +275,7 @@ def call_mcp_tool(tool_name, args, token):
     async def _run():
         async with httpx.AsyncClient() as client:
             # Initialize session (some servers require this first)
+            session_id = None
             try:
                 server_info = await mcp_initialize(client, token)
                 # Extract session ID if present (could be in different places)
@@ -259,14 +284,19 @@ def call_mcp_tool(tool_name, args, token):
                     server_info.get("serverInfo", {}).get("sessionId") or
                     None
                 )
+                print(f"Initialized MCP session, session_id: {session_id}")
             except Exception as e:
                 # Some servers don't require explicit initialize
                 print(f"Initialize warning: {e}")
-                session_id = None
+                # Don't fail here, try calling the tool anyway
             
             # Call tool
-            result = await mcp_call_tool(client, tool_name, args, token, session_id)
-            return result
+            try:
+                result = await mcp_call_tool(client, tool_name, args, token, session_id)
+                return result
+            except Exception as e:
+                print(f"Tool call error for {tool_name}: {e}")
+                raise
     
     return asyncio.run(_run())
 
@@ -276,6 +306,7 @@ def get_mcp_tools(token):
     async def _run():
         async with httpx.AsyncClient() as client:
             # Initialize session (some servers require this first)
+            session_id = None
             try:
                 server_info = await mcp_initialize(client, token)
                 # Extract session ID if present (could be in different places)
@@ -284,13 +315,19 @@ def get_mcp_tools(token):
                     server_info.get("serverInfo", {}).get("sessionId") or
                     None
                 )
+                print(f"Initialized MCP session for tools/list, session_id: {session_id}")
             except Exception as e:
                 # Some servers don't require explicit initialize
                 print(f"Initialize warning: {e}")
-                session_id = None
+                # Don't fail here, try getting tools anyway
             
-            tools = await mcp_list_tools(client, token, session_id)
-            return tools
+            try:
+                tools = await mcp_list_tools(client, token, session_id)
+                print(f"Fetched {len(tools)} tools from MCP server")
+                return tools
+            except Exception as e:
+                print(f"Error fetching tools: {e}")
+                raise
     
     return asyncio.run(_run())
 
