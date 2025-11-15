@@ -7,122 +7,6 @@
     <title>Travel Agent - AI Assistant</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<script>
-    // =============================
-    // AUTH CHECK ON PAGE LOAD
-    // =============================
-    async function checkAuth() {
-        const res = await fetch("/api/auth/status");
-        const data = await res.json();
-
-        if (data.authenticated) {
-            document.getElementById("login-modal").style.display = "none";
-            document.getElementById("main-ui").style.display = "block";
-            loadCapabilities();
-        } else {
-            document.getElementById("login-modal").style.display = "flex";
-            document.getElementById("main-ui").style.display = "none";
-        }
-    }
-
-    // =============================
-    // AUTH0 LOGIN BUTTON
-    // =============================
-    document.getElementById("auth0-login-btn").onclick = async () => {
-        const res = await fetch("/api/auth/login");
-        const data = await res.json();
-        window.location.href = data.redirect;   // redirect to Auth0 login
-    };
-
-    // =============================
-    // LOGOUT
-    // =============================
-    document.getElementById("logout-btn").onclick = async () => {
-        await fetch("/api/auth/logout", { method: "POST" });
-        window.location.reload();
-    };
-
-    // =============================
-    // LOAD MCP CAPABILITIES
-    // =============================
-    async function loadCapabilities() {
-        const res = await fetch("/api/capabilities");
-        const data = await res.json();
-
-        const grid = document.getElementById("capabilities-grid");
-        grid.innerHTML = "";
-
-        data.capabilities.forEach(cap => {
-            const el = document.createElement("div");
-            el.classList.add("capability-card");
-            el.innerHTML = `
-            <div class="capability-name">${cap.name}</div>
-            <div class="capability-example">${cap.example}</div>
-        `;
-            grid.appendChild(el);
-        });
-
-        document.getElementById("logout-btn").style.display = "block";
-    }
-
-    // =============================
-    // CHAT FUNCTIONALITY
-    // =============================
-    async function sendMessage() {
-        const input = document.getElementById("user-input");
-        const message = input.value.trim();
-        if (!message) return;
-
-        addMessage("user", message);
-        input.value = "";
-        input.style.height = "40px";
-
-        const res = await fetch("/api/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message })
-        });
-
-        const data = await res.json();
-        if (data.success) {
-            addMessage("assistant", data.message);
-        } else {
-            addMessage("assistant", `❌ Error: ${data.error}`);
-        }
-    }
-
-    function addMessage(role, text) {
-        const chat = document.getElementById("chat-container");
-        const m = document.createElement("div");
-        m.classList.add(role === "user" ? "user-message" : "assistant-message");
-        m.textContent = text;
-        chat.appendChild(m);
-        chat.scrollTop = chat.scrollHeight;
-    }
-
-    // =============================
-    // INPUT EVENT HANDLERS
-    // =============================
-    document.getElementById("send-btn").onclick = sendMessage;
-
-    document.getElementById("user-input").addEventListener("keydown", e => {
-        if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            sendMessage();
-        }
-    });
-
-    // Auto expand textarea
-    document.getElementById("user-input").addEventListener("input", function () {
-        this.style.height = "auto";
-        this.style.height = (this.scrollHeight) + "px";
-    });
-
-    // =============================
-    // INITIAL LOAD
-    // =============================
-    checkAuth();
-</script>
 
 <body>
 
@@ -138,12 +22,12 @@
         </div>
     </div>
 
-    <!-- Main Container -->
+    <!-- Main UI -->
     <div class="container" id="main-ui" style="display: none;">
 
         <!-- Header -->
         <div class="header">
-            <h1>✈️ Travel Agent AI</h1>
+            <h1>Math Agent AI</h1>
             <div class="status-bar">
                 <span class="status" id="status">
                     <span class="dot"></span>
@@ -154,8 +38,8 @@
             </div>
         </div>
 
-        <!-- Capabilities Panel -->
-        <div class="capabilities-panel" id="capabilities-panel">
+        <!-- Capabilities -->
+        <div class="capabilities-panel">
             <h3>🛠️ What I Can Do</h3>
             <div class="capabilities-grid" id="capabilities-grid">
                 <div class="capability-card loading">
@@ -165,40 +49,27 @@
             </div>
         </div>
 
-        <!-- Chat Container -->
+        <!-- Chat -->
         <div class="chat-container" id="chat-container">
             <div class="welcome-message">
-                <h2>👋 Welcome to Travel Agent AI</h2>
-                <p>I can help you search for flights, hotels, and car rentals. Just ask me anything!</p>
-                <div class="example-queries">
-                    <p><strong>Try asking:</strong></p>
-                    <ul>
-                        <li>"Find flights from New York to London"</li>
-                        <li>"Show me hotels in Tokyo"</li>
-                        <li>"I need a car rental in Dubai"</li>
-                    </ul>
-                </div>
+                <h2>👋 Welcome to Math Agent AI</h2>
+                <p>I can help you search flights, hotels, car rentals.</p>
             </div>
         </div>
 
-        <!-- Input Area -->
+        <!-- Input -->
         <div class="input-container">
             <div class="input-wrapper">
-                <textarea id="user-input"
-                    placeholder="Type your message here... (Press Enter to send, Shift+Enter for new line)"
-                    rows="1"></textarea>
-                <button id="send-btn" class="send-btn" title="Send message">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                        <path d="M22 2L11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-                        <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" stroke-width="2"
-                            stroke-linecap="round" stroke-linejoin="round" />
-                    </svg>
-                </button>
+                <textarea id="user-input" placeholder="Type your message..." rows="1"></textarea>
+                <button id="send-btn" class="send-btn">Send</button>
             </div>
         </div>
+
     </div>
 
+    <!-- Only external JS -->
     <script src="{{ url_for('static', filename='script.js') }}"></script>
+
 </body>
 
 </html>

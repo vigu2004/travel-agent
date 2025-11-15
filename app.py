@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Travel Agent Backend Server
-Connects OpenAI to a hosted MCP server for travel bookings
-Now uses Auth0 user authentication instead of email/password.
+Math Agent Backend Server
+Auth0 login + OpenAI Chat + MCP Math Server (Cloud Run)
 """
 
 from flask import Flask, render_template, request, jsonify, session
@@ -15,44 +14,41 @@ import os
 import asyncio
 from urllib.parse import urlencode
 from dotenv import load_dotenv
-from datetime import datetime
 from openai import OpenAI
 
-# Load environment variables
+# Load env
 load_dotenv()
 
-# Flask setup
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "super-secret-key")  # CHANGE IN PRODUCTION
+app.secret_key = os.getenv("SECRET_KEY", "super-secret-key")
 CORS(app)
 
-# Config
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8000")
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-# ============================================================
+# ---------------------------------------------------------
 # AUTH0 CONFIG
-# ============================================================
+# ---------------------------------------------------------
 
 AUTH0_DOMAIN = os.environ["AUTH0_DOMAIN"]
 AUTH0_CLIENT_ID = os.environ["AUTH0_CLIENT_ID"]
 AUTH0_CLIENT_SECRET = os.environ["AUTH0_CLIENT_SECRET"]
 AUTH0_AUDIENCE = os.environ["AUTH0_AUDIENCE"]
-AUTH0_CALLBACK_URL = os.environ["AUTH0_CALLBACK_URL"]  # /callback URL
+AUTH0_CALLBACK_URL = os.environ["AUTH0_CALLBACK_URL"]
 
 AUTH0_BASE = f"https://{AUTH0_DOMAIN}"
 AUTH0_AUTHORIZE_URL = f"{AUTH0_BASE}/authorize"
 AUTH0_TOKEN_URL = f"{AUTH0_BASE}/oauth/token"
 AUTH0_USERINFO_URL = f"{AUTH0_BASE}/userinfo"
 
-# ============================================================
-# AUTH ROUTES (Auth0 Login → Callback → Logout)
-# ============================================================
+
+# ---------------------------------------------------------
+# AUTH0 ROUTES
+# ---------------------------------------------------------
 
 @app.route("/api/auth/login")
 def auth_login():
-    """Redirect user to Auth0 login page."""
     params = {
         "response_type": "code",
         "client_id": AUTH0_CLIENT_ID,
@@ -60,19 +56,15 @@ def auth_login():
         "scope": "openid profile email",
         "audience": AUTH0_AUDIENCE
     }
-    return jsonify({
-        "redirect": f"{AUTH0_AUTHORIZE_URL}?{urlencode(params)}"
-    })
+    return jsonify({"redirect": f"{AUTH0_AUTHORIZE_URL}?{urlencode(params)}"})
 
 
 @app.route("/callback")
 def auth_callback():
-    """Auth0 redirects here after user logs in."""
     code = request.args.get("code")
     if not code:
-        return "Missing ?code from Auth0", 400
+        return "Missing code", 400
 
-    # Exchange code for tokens
     token_payload = {
         "grant_type": "authorization_code",
         "client_id": AUTH0_CLIENT_ID,
@@ -86,24 +78,21 @@ def auth_callback():
 
     access_token = token_data.get("access_token")
     if not access_token:
-        return f"Auth0 error: {token_data}", 401
+        return f"Auth0 Error: {token_data}", 401
 
-    # Fetch user profile
+    # User info
     userinfo_res = requests.get(
-        AUTH0_USERINFO_URL,
-        headers={"Authorization": f"Bearer {access_token}"}
+        AUTH0_USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"}
     )
     userinfo = userinfo_res.json()
 
-    # Save in session
     session["mcp_token"] = access_token
     session["mcp_user"] = userinfo
 
-    # Redirect back to UI
     return render_template("index.html", user=userinfo)
 
 
-@app.route("/api/auth/logout")
+@app.route("/api/auth/logout", methods=["POST"])
 def auth_logout():
     session.clear()
     return jsonify({"success": True})
@@ -113,17 +102,12 @@ def auth_logout():
 def auth_status():
     token = session.get("mcp_token")
     user = session.get("mcp_user")
-
-    return jsonify({
-        "success": True,
-        "authenticated": bool(token and user),
-        "user": user if user else None
-    })
+    return jsonify({"authenticated": bool(token), "user": user})
 
 
-# ============================================================
-# MCP CLIENT
-# ============================================================
+# ---------------------------------------------------------
+# MCP CLIENT HELPERS
+# ---------------------------------------------------------
 
 async def mcp_initialize(client, token):
     payload = {
@@ -132,12 +116,15 @@ async def mcp_initialize(client, token):
         "params": {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "travel-agent", "version": "1.0.0"}
+            "clientInfo": {"name": "math-agent", "version": "1.0.0"}
         },
         "id": 0
     }
 
-    headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "text/event-stream"
+    }
 
     async with httpx_sse.aconnect_sse(
         client, "POST", f"{MCP_SERVER_URL}/mcp",
@@ -146,41 +133,11 @@ async def mcp_initialize(client, token):
         async for event in stream.aiter_sse():
             if event.event == "message":
                 return stream.response.headers.get("mcp-session-id")
+
     return None
 
 
-def get_mcp_tools(token):
-    async def _run():
-        async with httpx.AsyncClient() as client:
-            session_id = await mcp_initialize(client, token)
-            if not session_id:
-                return []
-
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Accept": "text/event-stream",
-                "mcp-session-id": session_id
-            }
-
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "tools/list",
-                "params": {},
-                "id": 1
-            }
-
-            async with httpx_sse.aconnect_sse(
-                client, "POST", f"{MCP_SERVER_URL}/mcp",
-                json=payload, headers=headers
-            ) as stream:
-                async for event in stream.aiter_sse():
-                    if event.event == "message":
-                        data = json.loads(event.data)
-                        return data.get("result", {}).get("tools", [])
-    return asyncio.run(_run())
-
-
-def call_mcp_tool(tool_name, arguments, token):
+def call_mcp_tool(tool_name, args, token):
     async def _run():
         async with httpx.AsyncClient() as client:
             session_id = await mcp_initialize(client, token)
@@ -194,7 +151,7 @@ def call_mcp_tool(tool_name, arguments, token):
             payload = {
                 "jsonrpc": "2.0",
                 "method": "tools/call",
-                "params": {"name": tool_name, "arguments": arguments},
+                "params": {"name": tool_name, "arguments": args},
                 "id": 2
             }
 
@@ -205,141 +162,128 @@ def call_mcp_tool(tool_name, arguments, token):
                 async for event in stream.aiter_sse():
                     if event.event == "message":
                         return json.loads(event.data).get("result")
+
     return asyncio.run(_run())
 
 
-# ============================================================
-# TOOL WRAPPERS
-# ============================================================
+# ---------------------------------------------------------
+# MATH MCP TOOL WRAPPERS
+# ---------------------------------------------------------
 
-def search_flights_mcp(origin, destination, travel_class=None, token=None):
-    args = {"origin": origin, "destination": destination}
-    if travel_class:
-        args["cabin_class"] = travel_class
-    return call_mcp_tool("search_flights", args, token)
+def calculate_mcp(expr, token):
+    return call_mcp_tool("calculate", {"expression": expr}, token)
 
+def solve_equation_mcp(eq, token):
+    return call_mcp_tool("solve_equation", {"equation": eq}, token)
 
-def search_hotels_mcp(location, min_rating=None, token=None):
-    args = {"location": location}
-    if min_rating:
-        args["min_rating"] = min_rating
-    return call_mcp_tool("search_hotels", args, token)
+def differentiate_mcp(expr, var, token):
+    return call_mcp_tool("differentiate", {"expression": expr, "variable": var}, token)
 
-
-def search_car_rentals_mcp(location, car_type=None, token=None):
-    args = {"location": location}
-    if car_type:
-        args["car_type"] = car_type
-    return call_mcp_tool("search_car_rentals", args, token)
+def integrate_mcp(expr, var, token):
+    return call_mcp_tool("integrate", {"expression": expr, "variable": var}, token)
 
 
-def book_flight_mcp(flight_id, passenger_name, num_seats=1, token=None):
-    args = {"flight_id": flight_id, "passenger_name": passenger_name, "num_seats": num_seats}
-    return call_mcp_tool("book_flight", args, token)
-
-
-# ============================================================
-# OPENAI CHAT + FUNCTION CALLING
-# ============================================================
+# ---------------------------------------------------------
+# OPENAI TOOL SCHEMA
+# ---------------------------------------------------------
 
 OPENAI_FUNCTIONS = [
     {
         "type": "function",
         "function": {
-            "name": "search_flights",
-            "description": "Search for available flights",
+            "name": "calculate",
+            "description": "Evaluate a mathematical expression",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "origin": {"type": "string"},
-                    "destination": {"type": "string"},
-                    "travel_class": {"type": "string"}
+                    "expression": {"type": "string"}
                 },
-                "required": ["origin", "destination"]
+                "required": ["expression"]
             }
         }
     },
     {
         "type": "function",
         "function": {
-            "name": "search_hotels",
-            "description": "Search hotels",
+            "name": "solve_equation",
+            "description": "Solve an algebraic equation for x",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "location": {"type": "string"},
-                    "min_rating": {"type": "integer"}
+                    "equation": {"type": "string"}
                 },
-                "required": ["location"]
+                "required": ["equation"]
             }
         }
     },
     {
         "type": "function",
         "function": {
-            "name": "search_car_rentals",
-            "description": "Search car rentals",
+            "name": "differentiate",
+            "description": "Differentiate a function",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "location": {"type": "string"},
-                    "car_type": {"type": "string"}
+                    "expression": {"type": "string"},
+                    "variable": {"type": "string"}
                 },
-                "required": ["location"]
+                "required": ["expression"]
             }
         }
     },
     {
         "type": "function",
         "function": {
-            "name": "book_flight",
-            "description": "Book a flight",
+            "name": "integrate",
+            "description": "Integrate a function",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "flight_id": {"type": "string"},
-                    "passenger_name": {"type": "string"},
-                    "num_seats": {"type": "integer"}
+                    "expression": {"type": "string"},
+                    "variable": {"type": "string"}
                 },
-                "required": ["flight_id", "passenger_name"]
+                "required": ["expression"]
             }
         }
     }
 ]
 
 
-def execute_function(fname, args, token):
-    if fname == "search_flights":
-        return search_flights_mcp(args["origin"], args["destination"], args.get("travel_class"), token)
-    if fname == "search_hotels":
-        return search_hotels_mcp(args["location"], args.get("min_rating"), token)
-    if fname == "search_car_rentals":
-        return search_car_rentals_mcp(args["location"], args.get("car_type"), token)
-    if fname == "book_flight":
-        return book_flight_mcp(args["flight_id"], args["passenger_name"], args.get("num_seats", 1), token)
+# ---------------------------------------------------------
+# FUNCTION EXECUTION HANDLER
+# ---------------------------------------------------------
+
+def execute_function(name, args, token):
+    if name == "calculate":
+        return calculate_mcp(args["expression"], token)
+
+    if name == "solve_equation":
+        return solve_equation_mcp(args["equation"], token)
+
+    if name == "differentiate":
+        return differentiate_mcp(args["expression"], args.get("variable", "x"), token)
+
+    if name == "integrate":
+        return integrate_mcp(args["expression"], args.get("variable", "x"), token)
+
     return {"error": "Unknown function"}
 
 
-# ============================================================
-# CHAT ROUTE
-# ============================================================
+# ---------------------------------------------------------
+# CHAT ENDPOINT
+# ---------------------------------------------------------
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
     token = session.get("mcp_token")
     if not token:
-        return jsonify({"success": False, "error": "Not authenticated"}), 401
+        return jsonify({"error": "Not authenticated"}), 401
 
     data = request.json
     user_message = data.get("message")
-    history = data.get("history", [])
 
     messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful travel agent assistant."
-        },
-        *history,
+        {"role": "system", "content": "You are a math assistant."},
         {"role": "user", "content": user_message}
     ]
 
@@ -352,18 +296,18 @@ def chat():
 
     msg = response.choices[0].message
 
-    # Tool call handling
+    # 👉 If LLM triggers MCP tool
     if msg.tool_calls:
         results = []
         for tool_call in msg.tool_calls:
             fname = tool_call.function.name
             args = json.loads(tool_call.function.arguments)
-            result = execute_function(fname, args, token)
+            out = execute_function(fname, args, token)
             results.append({
                 "tool_call_id": tool_call.id,
                 "role": "tool",
                 "name": fname,
-                "content": json.dumps(result)
+                "content": json.dumps(out)
             })
 
         messages.append(msg)
@@ -373,40 +317,37 @@ def chat():
             model="gpt-4o-mini",
             messages=messages
         )
+        return jsonify({"message": second.choices[0].message.content})
 
-        return jsonify({
-            "success": True,
-            "message": second.choices[0].message.content
-        })
-
-    return jsonify({"success": True, "message": msg.content})
+    # No tool call
+    return jsonify({"message": msg.content})
 
 
-# ============================================================
-# MCP STATUS
-# ============================================================
+# ---------------------------------------------------------
+# UI + CAPABILITIES
+# ---------------------------------------------------------
 
-@app.route("/api/mcp/status")
-def mcp_status():
-    token = session.get("mcp_token")
-    if not token:
-        return jsonify({"success": False, "error": "Not logged in"}), 401
-
-    tools = get_mcp_tools(token)
-    return jsonify({
-        "success": True,
-        "tools_available": len(tools),
-        "tools": [t["name"] for t in tools]
-    })
 @app.route("/")
 def home():
-    user = session.get("mcp_user")
-    return render_template("index.html", user=user)
+    return render_template("index.html")
 
-# ============================================================
-# MAIN
-# ============================================================
+
+@app.route("/api/capabilities")
+def capabilities():
+    return jsonify({
+        "capabilities": [
+            {"name": "Calculate", "example": "2+2"},
+            {"name": "Solve equation", "example": "x^2 - 5x + 6 = 0"},
+            {"name": "Differentiate", "example": "differentiate x^3"},
+            {"name": "Integrate", "example": "integrate sin(x)"}
+        ]
+    })
+
+
+# ---------------------------------------------------------
+# RUN
+# ---------------------------------------------------------
 
 if __name__ == "__main__":
-    print("Travel Agent running at http://localhost:3000")
+    print("Math Agent running at http://localhost:3000")
     app.run(host="0.0.0.0", port=3000, debug=True)
