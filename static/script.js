@@ -41,31 +41,61 @@ document.addEventListener("DOMContentLoaded", () => {
     // LOAD CAPABILITIES
     // =============================
     async function loadCapabilities() {
-        const res = await fetch("/api/capabilities");
-        const data = await res.json();
+        try {
+            const res = await fetch("/api/capabilities");
+            const data = await res.json();
 
-        const grid = document.getElementById("capabilities-grid");
-        grid.innerHTML = "";
+            if (data.error) {
+                document.getElementById("mcp-server").textContent = "MCP: ❌ Error";
+                document.getElementById("mcp-server").style.color = "#ff4444";
+                return;
+            }
 
-        const icons = {
-            "Calculate": "🔢",
-            "Solve equation": "📐",
-            "Differentiate": "📊",
-            "Integrate": "∫"
-        };
+            const grid = document.getElementById("capabilities-grid");
+            grid.innerHTML = "";
 
-        data.capabilities.forEach(cap => {
-            const el = document.createElement("div");
-            el.classList.add("capability-card");
-            el.innerHTML = `
-                <div class="capability-icon">${icons[cap.name] || "🔧"}</div>
-                <div>
-                    <div class="capability-name">${cap.name}</div>
-                    <div class="capability-description">${cap.example}</div>
-                </div>
-            `;
-            grid.appendChild(el);
-        });
+            // Update MCP status
+            const toolCount = data.capabilities?.length || 0;
+            document.getElementById("mcp-server").textContent = `MCP: ✅ Connected (${toolCount} tools)`;
+            document.getElementById("mcp-server").style.color = "#4caf50";
+
+            const icons = {
+                "calculate": "🔢",
+                "solve_equation": "📐",
+                "differentiate": "📊",
+                "integrate": "∫",
+                "simplify": "✨",
+                "expand": "📏",
+                "factorize": "🔍",
+                "limit": "∞",
+                "series": "📈",
+                "matrix": "⬛"
+            };
+
+            data.capabilities.forEach(cap => {
+                const el = document.createElement("div");
+                el.classList.add("capability-card");
+                const icon = icons[cap.name] || icons[cap.name?.toLowerCase()] || "🔧";
+                const description = cap.description || cap.example || "Math tool";
+                // Truncate long descriptions
+                const shortDesc = description.length > 50 
+                    ? description.substring(0, 50) + "..." 
+                    : description;
+                
+                el.innerHTML = `
+                    <div class="capability-icon">${icon}</div>
+                    <div class="capability-info">
+                        <div class="capability-name">${cap.name}</div>
+                        <div class="capability-description" title="${description}">${shortDesc}</div>
+                    </div>
+                `;
+                grid.appendChild(el);
+            });
+        } catch (error) {
+            console.error("Failed to load capabilities:", error);
+            document.getElementById("mcp-server").textContent = "MCP: ❌ Failed";
+            document.getElementById("mcp-server").style.color = "#ff4444";
+        }
     }
 
     // =============================
@@ -137,6 +167,14 @@ document.addEventListener("DOMContentLoaded", () => {
         chat.appendChild(messageDiv);
         chat.scrollTop = chat.scrollHeight;
     }
+
+    // =============================
+    // TOGGLE CAPABILITIES PANEL
+    // =============================
+    document.getElementById("capabilities-toggle").addEventListener("click", () => {
+        const panel = document.getElementById("capabilities-panel");
+        panel.classList.toggle("collapsed");
+    });
 
     // =============================
     // INIT
