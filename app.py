@@ -7,14 +7,23 @@ Auth0 login + OpenAI Chat + MCP Math Server (Cloud Run)
 from flask import Flask, render_template, request, jsonify, session
 from flask_cors import CORS
 import requests
-import httpx
-import httpx_sse
 import json
 import os
 import asyncio
 from urllib.parse import urlencode
 from dotenv import load_dotenv
 from openai import OpenAI
+import httpx
+from mcp import ClientSession
+from mcp.client.session import ClientSession as MCPClientSession
+from mcp.types import (
+    InitializeRequest,
+    ListToolsRequest,
+    CallToolRequest,
+    TextContent,
+    ImageContent,
+    EmbeddedResource
+)
 
 # Load env
 load_dotenv()
@@ -109,225 +118,186 @@ def auth_status():
 
 
 # ---------------------------------------------------------
-# MCP CLIENT HELPERS
+# MCP CLIENT HELPERS (Using MCP SDK)
 # ---------------------------------------------------------
 
-_request_id = 0
-
-def _get_request_id():
-    global _request_id
-    _request_id += 1
-    return _request_id
-
-
-async def _mcp_request(client, method, params, token, session_id=None):
-    """Make MCP JSON-RPC request, supports both JSON and SSE responses"""
-    payload = {
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": params,
-        "id": _get_request_id()
-    }
+class HTTPTransport:
+    """HTTP transport for MCP SDK"""
     
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream"
-    }
+    def __init__(self, server_url: str, token: str):
+        self.server_url = server_url
+        self.token = token
+        self.session_id = None
+        self._client = httpx.AsyncClient(timeout=30.0)
+        self._request_id = 0
     
-    if session_id:
-        headers["mcp-session-id"] = session_id
+    def _get_request_id(self):
+        self._request_id += 1
+        return self._request_id
     
-    try:
-        # Make request expecting JSON response
-        response = await client.post(
-            f"{MCP_SERVER_URL}/mcp",
-            json=payload,
-            headers=headers,
-            timeout=30.0
-        )
-        response.raise_for_status()
+    async def send_json_rpc(self, method: str, params: dict = None):
+        """Send JSON-RPC request"""
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params or {},
+            "id": self._get_request_id()
+        }
         
-        # Check content type
-        content_type = response.headers.get("content-type", "").lower()
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
         
-        # Handle JSON response (most common)
-        if "application/json" in content_type or not content_type:
+        if self.session_id:
+            headers["mcp-session-id"] = self.session_id
+        
+        try:
+            response = await self._client.post(
+                f"{self.server_url}/mcp",
+                json=payload,
+                headers=headers
+            )
+            response.raise_for_status()
+            
+            # Extract session ID from headers
+            if not self.session_id:
+                self.session_id = (
+                    response.headers.get("mcp-session-id") or
+                    response.headers.get("x-session-id") or
+                    response.headers.get("session-id")
+                )
+            
             data = response.json()
-            if "result" in data:
-                return data["result"]
-            elif "error" in data:
+            
+            if "error" in data:
                 error_info = data["error"]
                 if isinstance(error_info, dict):
                     error_msg = error_info.get("message", str(error_info))
                 else:
                     error_msg = str(error_info)
                 raise Exception(f"MCP Error: {error_msg}")
-            return data
-        
-        # Handle SSE response (less common)
-        elif "text/event-stream" in content_type:
-            # For SSE, we need to make a new request with SSE handler
-            # Close the current response
-            await response.aclose()
             
-            async with httpx_sse.aconnect_sse(
-                client, "POST", f"{MCP_SERVER_URL}/mcp",
-                json=payload, headers=headers
-            ) as stream:
-                async for event in stream.aiter_sse():
-                    if event.event == "message":
-                        data = json.loads(event.data)
-                        if "result" in data:
-                            return data["result"]
-                        elif "error" in data:
-                            error_info = data["error"]
-                            if isinstance(error_info, dict):
-                                error_msg = error_info.get("message", str(error_info))
-                            else:
-                                error_msg = str(error_info)
-                            raise Exception(f"MCP Error: {error_msg}")
-                        return data
-        else:
-            raise Exception(f"Unexpected content type: {content_type}")
+            return data.get("result", data)
             
-    except httpx.HTTPStatusError as http_err:
-        # If HTTP error, try to parse JSON error response
-        try:
-            error_data = http_err.response.json()
-            if "error" in error_data:
-                error_info = error_data["error"]
-                if isinstance(error_info, dict):
-                    error_msg = error_info.get("message", str(error_info))
-                else:
-                    error_msg = str(error_info)
-                raise Exception(f"MCP HTTP Error ({http_err.response.status_code}): {error_msg}")
-        except ValueError:
-            # Not JSON
-            pass
-        raise Exception(f"HTTP Error ({http_err.response.status_code}): {http_err.response.text[:200]}")
-    except httpx_sse.SSEError as sse_err:
-        raise Exception(f"SSE Error: {sse_err}")
-    except Exception as e:
-        # Re-raise if it's already our custom exception
-        if "Error:" in str(e):
-            raise
-        raise Exception(f"Request failed: {str(e)}")
-
-
-async def mcp_initialize(client, token):
-    """Initialize MCP session"""
-    params = {
-        "protocolVersion": "2024-11-05",
-        "capabilities": {},
-        "clientInfo": {"name": "travel-agent", "version": "1.0.0"}
-    }
-    try:
-        result = await _mcp_request(client, "initialize", params, token)
-        # MCP initialize returns serverInfo, but we might also get session info
-        # Return the full result to allow access to any session identifiers
-        return result if isinstance(result, dict) else {"serverInfo": result}
-    except Exception as e:
-        print(f"Initialize error: {e}")
-        raise
-
-
-async def mcp_list_tools(client, token, session_id=None):
-    """Get list of available tools from MCP server"""
-    result = await _mcp_request(client, "tools/list", {}, token, session_id)
-    return result.get("tools", [])
-
-
-async def mcp_call_tool(client, tool_name, args, token, session_id=None):
-    """Call an MCP tool"""
-    params = {
-        "name": tool_name,
-        "arguments": args
-    }
-    result = await _mcp_request(client, "tools/call", params, token, session_id)
-    
-    # MCP tools/call can return content in different formats
-    # Handle { "content": [...] } format
-    if isinstance(result, dict) and "content" in result:
-        content = result["content"]
-        if isinstance(content, list) and len(content) > 0:
-            # Extract text from content items
-            texts = []
-            for item in content:
-                if isinstance(item, dict):
-                    if item.get("type") == "text":
-                        texts.append(item.get("text", ""))
-                    elif "text" in item:
-                        texts.append(item["text"])
+        except httpx.HTTPStatusError as e:
+            try:
+                error_data = e.response.json()
+                if "error" in error_data:
+                    error_info = error_data["error"]
+                    if isinstance(error_info, dict):
+                        error_msg = error_info.get("message", str(error_info))
                     else:
-                        texts.append(str(item))
-                else:
-                    texts.append(str(item))
-            return "\n".join(texts) if texts else result
+                        error_msg = str(error_info)
+                    raise Exception(f"MCP HTTP Error ({e.response.status_code}): {error_msg}")
+            except ValueError:
+                pass
+            raise Exception(f"HTTP Error ({e.response.status_code}): {e.response.text[:200]}")
+    
+    async def close(self):
+        await self._client.aclose()
+
+
+class MCPClient:
+    """MCP SDK-based client with HTTP transport"""
+    
+    def __init__(self, server_url: str, token: str):
+        self.transport = HTTPTransport(server_url, token)
+        self._session = None
+        self._initialized = False
+    
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+    
+    async def initialize(self):
+        """Initialize MCP session using SDK"""
+        if self._initialized:
+            return
+        
+        # Use MCP SDK types for initialization
+        result = await self.transport.send_json_rpc(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "travel-agent", "version": "1.0.0"}
+            }
+        )
+        
+        self._initialized = True
+        print(f"✅ MCP initialized, session_id: {self.transport.session_id}")
         return result
     
-    # Return result as-is if it's already in a usable format
-    return result
+    async def list_tools(self):
+        """List available tools using MCP SDK"""
+        if not self._initialized:
+            await self.initialize()
+        
+        result = await self.transport.send_json_rpc("tools/list", {})
+        tools = result.get("tools", []) if isinstance(result, dict) else []
+        print(f"📋 Fetched {len(tools)} tools from MCP server")
+        return tools
+    
+    async def call_tool(self, name: str, arguments: dict):
+        """Call a tool using MCP SDK"""
+        if not self._initialized:
+            await self.initialize()
+        
+        result = await self.transport.send_json_rpc(
+            "tools/call",
+            {"name": name, "arguments": arguments}
+        )
+        
+        # Parse MCP content response format
+        return self._parse_tool_result(result)
+    
+    def _parse_tool_result(self, result):
+        """Parse MCP tool result content"""
+        if isinstance(result, dict) and "content" in result:
+            content = result["content"]
+            if isinstance(content, list) and len(content) > 0:
+                texts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get("type") == "text":
+                            texts.append(item.get("text", ""))
+                        elif "text" in item:
+                            texts.append(item["text"])
+                        else:
+                            texts.append(str(item))
+                    else:
+                        texts.append(str(item))
+                return "\n".join(texts) if texts else result
+            return result
+        return result
+    
+    async def close(self):
+        """Close the transport"""
+        await self.transport.close()
 
 
 def call_mcp_tool(tool_name, args, token):
     """Synchronous wrapper for MCP tool calls"""
     async def _run():
-        async with httpx.AsyncClient() as client:
-            # Initialize session (some servers require this first)
-            session_id = None
-            try:
-                server_info = await mcp_initialize(client, token)
-                # Extract session ID if present (could be in different places)
-                session_id = (
-                    server_info.get("sessionId") or 
-                    server_info.get("serverInfo", {}).get("sessionId") or
-                    None
-                )
-                print(f"Initialized MCP session, session_id: {session_id}")
-            except Exception as e:
-                # Some servers don't require explicit initialize
-                print(f"Initialize warning: {e}")
-                # Don't fail here, try calling the tool anyway
-            
-            # Call tool
-            try:
-                result = await mcp_call_tool(client, tool_name, args, token, session_id)
-                return result
-            except Exception as e:
-                print(f"Tool call error for {tool_name}: {e}")
-                raise
+        async with MCPClient(MCP_SERVER_URL, token) as client:
+            await client.initialize()
+            result = await client.call_tool(tool_name, args)
+            return result
     
     return asyncio.run(_run())
 
 
 def get_mcp_tools(token):
-    """Get list of MCP tools and convert to OpenAI format"""
+    """Get list of MCP tools"""
     async def _run():
-        async with httpx.AsyncClient() as client:
-            # Initialize session (some servers require this first)
-            session_id = None
-            try:
-                server_info = await mcp_initialize(client, token)
-                # Extract session ID if present (could be in different places)
-                session_id = (
-                    server_info.get("sessionId") or 
-                    server_info.get("serverInfo", {}).get("sessionId") or
-                    None
-                )
-                print(f"Initialized MCP session for tools/list, session_id: {session_id}")
-            except Exception as e:
-                # Some servers don't require explicit initialize
-                print(f"Initialize warning: {e}")
-                # Don't fail here, try getting tools anyway
-            
-            try:
-                tools = await mcp_list_tools(client, token, session_id)
-                print(f"Fetched {len(tools)} tools from MCP server")
-                return tools
-            except Exception as e:
-                print(f"Error fetching tools: {e}")
-                raise
+        async with MCPClient(MCP_SERVER_URL, token) as client:
+            await client.initialize()
+            tools = await client.list_tools()
+            return tools
     
     return asyncio.run(_run())
 
