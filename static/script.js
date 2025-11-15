@@ -10,10 +10,12 @@ document.addEventListener("DOMContentLoaded", () => {
         if (data.authenticated) {
             document.getElementById("login-modal").style.display = "none";
             document.getElementById("main-ui").style.display = "block";
+            document.getElementById("logout-btn").style.display = "block";
             loadCapabilities();
         } else {
             document.getElementById("login-modal").style.display = "flex";
             document.getElementById("main-ui").style.display = "none";
+            document.getElementById("logout-btn").style.display = "none";
         }
     }
 
@@ -45,12 +47,22 @@ document.addEventListener("DOMContentLoaded", () => {
         const grid = document.getElementById("capabilities-grid");
         grid.innerHTML = "";
 
+        const icons = {
+            "Calculate": "🔢",
+            "Solve equation": "📐",
+            "Differentiate": "📊",
+            "Integrate": "∫"
+        };
+
         data.capabilities.forEach(cap => {
             const el = document.createElement("div");
             el.classList.add("capability-card");
             el.innerHTML = `
-                <div class="capability-name">${cap.name}</div>
-                <div class="capability-example">${cap.example}</div>
+                <div class="capability-icon">${icons[cap.name] || "🔧"}</div>
+                <div>
+                    <div class="capability-name">${cap.name}</div>
+                    <div class="capability-description">${cap.example}</div>
+                </div>
             `;
             grid.appendChild(el);
         });
@@ -61,20 +73,39 @@ document.addEventListener("DOMContentLoaded", () => {
     // =============================
     async function sendMessage() {
         const input = document.getElementById("user-input");
+        const sendBtn = document.getElementById("send-btn");
         const message = input.value.trim();
         if (!message) return;
 
         addMessage("user", message);
         input.value = "";
+        sendBtn.disabled = true;
 
-        const res = await fetch("/api/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message })
-        });
+        // Show typing indicator
+        const chat = document.getElementById("chat-container");
+        const typingDiv = document.createElement("div");
+        typingDiv.classList.add("message", "assistant");
+        typingDiv.id = "typing-indicator";
+        typingDiv.innerHTML = '<div class="message-content"><div class="typing-indicator"><span></span><span></span><span></span></div></div>';
+        chat.appendChild(typingDiv);
+        chat.scrollTop = chat.scrollHeight;
 
-        const data = await res.json();
-        addMessage("assistant", data.message || data.error);
+        try {
+            const res = await fetch("/api/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ message })
+            });
+
+            const data = await res.json();
+            typingDiv.remove();
+            addMessage("assistant", data.message || data.error || "An error occurred");
+        } catch (error) {
+            typingDiv.remove();
+            addMessage("assistant", "Error: " + error.message);
+        } finally {
+            sendBtn.disabled = false;
+        }
     }
 
     document.getElementById("send-btn").addEventListener("click", sendMessage);
@@ -88,10 +119,22 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function addMessage(role, text) {
         const chat = document.getElementById("chat-container");
-        const div = document.createElement("div");
-        div.classList.add(role === "user" ? "user-message" : "assistant-message");
-        div.textContent = text;
-        chat.appendChild(div);
+        
+        // Remove welcome message if it exists
+        const welcomeMsg = chat.querySelector(".welcome-message");
+        if (welcomeMsg) {
+            welcomeMsg.remove();
+        }
+        
+        const messageDiv = document.createElement("div");
+        messageDiv.classList.add("message", role);
+        
+        const contentDiv = document.createElement("div");
+        contentDiv.classList.add("message-content");
+        contentDiv.textContent = text;
+        
+        messageDiv.appendChild(contentDiv);
+        chat.appendChild(messageDiv);
         chat.scrollTop = chat.scrollHeight;
     }
 
