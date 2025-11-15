@@ -131,7 +131,8 @@ async def _mcp_request(client, method, params, token, session_id=None):
     
     headers = {
         "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream"
     }
     
     if session_id:
@@ -307,7 +308,7 @@ def convert_mcp_tool_to_openai(mcp_tool):
                     "type": prop_def.get("type", "string"),
                     "description": prop_def.get("description", "")
                 }
-            required = schema.get("required", [])
+            required = schema.get( "required", [])
     
     return {
         "type": "function",
