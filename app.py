@@ -94,6 +94,9 @@ def auth_callback():
 
 @app.route("/api/auth/logout", methods=["POST"])
 def auth_logout():
+    token = session.get("mcp_token")
+    if token:
+        clear_tool_cache(token)
     session.clear()
     return jsonify({"success": True})
 
@@ -109,144 +112,244 @@ def auth_status():
 # MCP CLIENT HELPERS
 # ---------------------------------------------------------
 
-async def mcp_initialize(client, token):
+_request_id = 0
+
+def _get_request_id():
+    global _request_id
+    _request_id += 1
+    return _request_id
+
+
+async def _mcp_request(client, method, params, token, session_id=None):
+    """Make MCP JSON-RPC request, supports both JSON and SSE responses"""
     payload = {
         "jsonrpc": "2.0",
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "math-agent", "version": "1.0.0"}
-        },
-        "id": 0
+        "method": method,
+        "params": params,
+        "id": _get_request_id()
     }
-
+    
     headers = {
         "Authorization": f"Bearer {token}",
-        "Accept": "text/event-stream"
+        "Content-Type": "application/json"
     }
+    
+    if session_id:
+        headers["mcp-session-id"] = session_id
+    
+    # Try JSON request first (most common)
+    try:
+        response = await client.post(
+            f"{MCP_SERVER_URL}/mcp",
+            json=payload,
+            headers=headers,
+            timeout=30.0
+        )
+        response.raise_for_status()
+        
+        # Check content type
+        content_type = response.headers.get("content-type", "").lower()
+        
+        if "application/json" in content_type:
+            data = response.json()
+            if "result" in data:
+                return data["result"]
+            elif "error" in data:
+                raise Exception(f"MCP Error: {data['error']}")
+            return data
+        
+        elif "text/event-stream" in content_type:
+            # Handle SSE response - need to reconnect for SSE
+            try:
+                async with httpx_sse.aconnect_sse(
+                    client, "POST", f"{MCP_SERVER_URL}/mcp",
+                    json=payload, headers=headers
+                ) as stream:
+                    async for event in stream.aiter_sse():
+                        if event.event == "message":
+                            data = json.loads(event.data)
+                            if "result" in data:
+                                return data["result"]
+                            elif "error" in data:
+                                raise Exception(f"MCP Error: {data['error']}")
+                            return data
+            except httpx_sse.SSEError as sse_err:
+                # If SSE fails, fall back to trying JSON again
+                raise Exception(f"SSE Error: {sse_err}")
+    except httpx.HTTPStatusError as http_err:
+        # If HTTP error, try to parse JSON error response
+        try:
+            error_data = http_err.response.json()
+            if "error" in error_data:
+                raise Exception(f"MCP HTTP Error: {error_data['error']}")
+        except:
+            pass
+        raise Exception(f"HTTP Error: {http_err}")
+    except Exception as e:
+        # Re-raise if it's already our custom exception
+        if "MCP Error" in str(e) or "SSE Error" in str(e):
+            raise
+        raise Exception(f"Request failed: {str(e)}")
+    
+    raise Exception("Unexpected response format")
 
-    async with httpx_sse.aconnect_sse(
-        client, "POST", f"{MCP_SERVER_URL}/mcp",
-        json=payload, headers=headers
-    ) as stream:
-        async for event in stream.aiter_sse():
-            if event.event == "message":
-                return stream.response.headers.get("mcp-session-id")
 
-    return None
+async def mcp_initialize(client, token):
+    """Initialize MCP session"""
+    params = {
+        "protocolVersion": "2024-11-05",
+        "capabilities": {},
+        "clientInfo": {"name": "math-agent", "version": "1.0.0"}
+    }
+    result = await _mcp_request(client, "initialize", params, token)
+    # MCP initialize returns serverInfo, but we might also get session info
+    # Return the full result to allow access to any session identifiers
+    return result if isinstance(result, dict) else {"serverInfo": result}
+
+
+async def mcp_list_tools(client, token, session_id=None):
+    """Get list of available tools from MCP server"""
+    result = await _mcp_request(client, "tools/list", {}, token, session_id)
+    return result.get("tools", [])
+
+
+async def mcp_call_tool(client, tool_name, args, token, session_id=None):
+    """Call an MCP tool"""
+    params = {
+        "name": tool_name,
+        "arguments": args
+    }
+    result = await _mcp_request(client, "tools/call", params, token, session_id)
+    
+    # MCP tools/call can return content in different formats
+    # Handle { "content": [...] } format
+    if isinstance(result, dict) and "content" in result:
+        content = result["content"]
+        if isinstance(content, list) and len(content) > 0:
+            # Extract text from content items
+            texts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        texts.append(item.get("text", ""))
+                    elif "text" in item:
+                        texts.append(item["text"])
+                    else:
+                        texts.append(str(item))
+                else:
+                    texts.append(str(item))
+            return "\n".join(texts) if texts else result
+        return result
+    
+    # Return result as-is if it's already in a usable format
+    return result
 
 
 def call_mcp_tool(tool_name, args, token):
+    """Synchronous wrapper for MCP tool calls"""
     async def _run():
         async with httpx.AsyncClient() as client:
-            session_id = await mcp_initialize(client, token)
-
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Accept": "text/event-stream",
-                "mcp-session-id": session_id
-            }
-
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "tools/call",
-                "params": {"name": tool_name, "arguments": args},
-                "id": 2
-            }
-
-            async with httpx_sse.aconnect_sse(
-                client, "POST", f"{MCP_SERVER_URL}/mcp",
-                json=payload, headers=headers
-            ) as stream:
-                async for event in stream.aiter_sse():
-                    if event.event == "message":
-                        return json.loads(event.data).get("result")
-
+            # Initialize session (some servers require this first)
+            try:
+                server_info = await mcp_initialize(client, token)
+                # Extract session ID if present (could be in different places)
+                session_id = (
+                    server_info.get("sessionId") or 
+                    server_info.get("serverInfo", {}).get("sessionId") or
+                    None
+                )
+            except Exception as e:
+                # Some servers don't require explicit initialize
+                print(f"Initialize warning: {e}")
+                session_id = None
+            
+            # Call tool
+            result = await mcp_call_tool(client, tool_name, args, token, session_id)
+            return result
+    
     return asyncio.run(_run())
 
 
-# ---------------------------------------------------------
-# MATH MCP TOOL WRAPPERS
-# ---------------------------------------------------------
+def get_mcp_tools(token):
+    """Get list of MCP tools and convert to OpenAI format"""
+    async def _run():
+        async with httpx.AsyncClient() as client:
+            # Initialize session (some servers require this first)
+            try:
+                server_info = await mcp_initialize(client, token)
+                # Extract session ID if present (could be in different places)
+                session_id = (
+                    server_info.get("sessionId") or 
+                    server_info.get("serverInfo", {}).get("sessionId") or
+                    None
+                )
+            except Exception as e:
+                # Some servers don't require explicit initialize
+                print(f"Initialize warning: {e}")
+                session_id = None
+            
+            tools = await mcp_list_tools(client, token, session_id)
+            return tools
+    
+    return asyncio.run(_run())
 
-def calculate_mcp(expr, token):
-    return call_mcp_tool("calculate", {"expression": expr}, token)
 
-def solve_equation_mcp(eq, token):
-    return call_mcp_tool("solve_equation", {"equation": eq}, token)
-
-def differentiate_mcp(expr, var, token):
-    return call_mcp_tool("differentiate", {"expression": expr, "variable": var}, token)
-
-def integrate_mcp(expr, var, token):
-    return call_mcp_tool("integrate", {"expression": expr, "variable": var}, token)
-
-
-# ---------------------------------------------------------
-# OPENAI TOOL SCHEMA
-# ---------------------------------------------------------
-
-OPENAI_FUNCTIONS = [
-    {
+def convert_mcp_tool_to_openai(mcp_tool):
+    """Convert MCP tool definition to OpenAI function format"""
+    properties = {}
+    required = []
+    
+    if "inputSchema" in mcp_tool:
+        schema = mcp_tool["inputSchema"]
+        if schema.get("type") == "object" and "properties" in schema:
+            for prop_name, prop_def in schema["properties"].items():
+                properties[prop_name] = {
+                    "type": prop_def.get("type", "string"),
+                    "description": prop_def.get("description", "")
+                }
+            required = schema.get("required", [])
+    
+    return {
         "type": "function",
         "function": {
-            "name": "calculate",
-            "description": "Evaluate a mathematical expression",
+            "name": mcp_tool.get("name", ""),
+            "description": mcp_tool.get("description", ""),
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "expression": {"type": "string"}
-                },
-                "required": ["expression"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "solve_equation",
-            "description": "Solve an algebraic equation for x",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "equation": {"type": "string"}
-                },
-                "required": ["equation"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "differentiate",
-            "description": "Differentiate a function",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {"type": "string"},
-                    "variable": {"type": "string"}
-                },
-                "required": ["expression"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "integrate",
-            "description": "Integrate a function",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {"type": "string"},
-                    "variable": {"type": "string"}
-                },
-                "required": ["expression"]
+                "properties": properties,
+                "required": required
             }
         }
     }
-]
+
+
+# ---------------------------------------------------------
+# TOOL CACHE
+# ---------------------------------------------------------
+
+# Cache MCP tools per session to avoid repeated calls
+_tool_cache = {}
+
+
+def get_openai_functions(token):
+    """Get OpenAI function definitions from MCP server"""
+    if token not in _tool_cache:
+        try:
+            mcp_tools = get_mcp_tools(token)
+            _tool_cache[token] = [convert_mcp_tool_to_openai(tool) for tool in mcp_tools]
+        except Exception as e:
+            print(f"Error fetching MCP tools: {e}")
+            # Return empty list if MCP server is unavailable
+            _tool_cache[token] = []
+    return _tool_cache[token]
+
+
+def clear_tool_cache(token=None):
+    """Clear tool cache, optionally for a specific token"""
+    if token:
+        _tool_cache.pop(token, None)
+    else:
+        _tool_cache.clear()
 
 
 # ---------------------------------------------------------
@@ -254,19 +357,12 @@ OPENAI_FUNCTIONS = [
 # ---------------------------------------------------------
 
 def execute_function(name, args, token):
-    if name == "calculate":
-        return calculate_mcp(args["expression"], token)
-
-    if name == "solve_equation":
-        return solve_equation_mcp(args["equation"], token)
-
-    if name == "differentiate":
-        return differentiate_mcp(args["expression"], args.get("variable", "x"), token)
-
-    if name == "integrate":
-        return integrate_mcp(args["expression"], args.get("variable", "x"), token)
-
-    return {"error": "Unknown function"}
+    """Execute MCP tool by name"""
+    try:
+        result = call_mcp_tool(name, args, token)
+        return result
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ---------------------------------------------------------
@@ -282,15 +378,21 @@ def chat():
     data = request.json
     user_message = data.get("message")
 
+    # Get tools from MCP server
+    openai_functions = get_openai_functions(token)
+    
+    if not openai_functions:
+        return jsonify({"error": "No tools available from MCP server"}), 500
+
     messages = [
-        {"role": "system", "content": "You are a math assistant."},
+        {"role": "system", "content": "You are a math assistant. Use the available tools to perform calculations."},
         {"role": "user", "content": user_message}
     ]
 
     response = openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
-        tools=OPENAI_FUNCTIONS,
+        tools=openai_functions,
         tool_choice="auto"
     )
 
@@ -307,7 +409,7 @@ def chat():
                 "tool_call_id": tool_call.id,
                 "role": "tool",
                 "name": fname,
-                "content": json.dumps(out)
+                "content": json.dumps(out) if isinstance(out, (dict, list)) else str(out)
             })
 
         messages.append(msg)
@@ -334,14 +436,22 @@ def home():
 
 @app.route("/api/capabilities")
 def capabilities():
-    return jsonify({
-        "capabilities": [
-            {"name": "Calculate", "example": "2+2"},
-            {"name": "Solve equation", "example": "x^2 - 5x + 6 = 0"},
-            {"name": "Differentiate", "example": "differentiate x^3"},
-            {"name": "Integrate", "example": "integrate sin(x)"}
+    token = session.get("mcp_token")
+    if not token:
+        return jsonify({"capabilities": []})
+    
+    try:
+        mcp_tools = get_mcp_tools(token)
+        capabilities_list = [
+            {
+                "name": tool.get("name", ""),
+                "description": tool.get("description", "")
+            }
+            for tool in mcp_tools
         ]
-    })
+        return jsonify({"capabilities": capabilities_list})
+    except Exception as e:
+        return jsonify({"capabilities": [], "error": str(e)})
 
 
 # ---------------------------------------------------------
