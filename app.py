@@ -147,7 +147,7 @@ class HTTPTransport:
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
-            "Accept": "application/json"
+            "Accept": "application/json, text/event-stream"
         }
         
         if self.session_id:
