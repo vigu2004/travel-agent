@@ -190,6 +190,61 @@ def get_mcp_tools(token):
     return asyncio.run(_run())
 
 
+def fix_schema_recursive(schema):
+    """Recursively fix schema to be OpenAI-compatible"""
+    if not isinstance(schema, dict):
+        return schema
+    
+    fixed = {}
+    
+    # Copy type (default to string if not specified)
+    if "type" in schema:
+        fixed["type"] = schema["type"]
+    else:
+        # If no type specified but has properties, it's an object
+        if "properties" in schema:
+            fixed["type"] = "object"
+        elif "items" in schema:
+            fixed["type"] = "array"
+        else:
+            # Default to string for safety
+            return {"type": "string", "description": schema.get("description", "")}
+    
+    # Handle array types - OpenAI requires 'items'
+    if fixed.get("type") == "array":
+        if "items" in schema and schema["items"]:
+            # Recursively fix nested items
+            fixed["items"] = fix_schema_recursive(schema["items"])
+        else:
+            # Default to number if items not specified or empty
+            fixed["items"] = {"type": "number"}
+        
+        # Ensure items always has a type
+        if isinstance(fixed["items"], dict) and "type" not in fixed["items"]:
+            fixed["items"]["type"] = "number"
+    
+    # Handle object types
+    if fixed.get("type") == "object":
+        if "properties" in schema:
+            fixed["properties"] = {}
+            for key, value in schema["properties"].items():
+                fixed["properties"][key] = fix_schema_recursive(value)
+        if "required" in schema:
+            fixed["required"] = schema["required"]
+        # Add additionalProperties: false for stricter validation
+        if "additionalProperties" in schema:
+            fixed["additionalProperties"] = schema["additionalProperties"]
+    
+    # Copy other common schema properties
+    for key in ["description", "enum", "default", "minimum", "maximum", 
+                "minItems", "maxItems", "minLength", "maxLength",
+                "pattern", "format", "title", "examples"]:
+        if key in schema:
+            fixed[key] = schema[key]
+    
+    return fixed
+
+
 def convert_mcp_tool_to_openai(mcp_tool):
     """Convert MCP tool definition to OpenAI function format"""
     properties = {}
@@ -199,33 +254,8 @@ def convert_mcp_tool_to_openai(mcp_tool):
         schema = mcp_tool["inputSchema"]
         if schema.get("type") == "object" and "properties" in schema:
             for prop_name, prop_def in schema["properties"].items():
-                # Deep copy the property definition to preserve all schema details
-                prop_schema = {}
-                
-                # Copy type
-                if "type" in prop_def:
-                    prop_schema["type"] = prop_def["type"]
-                else:
-                    prop_schema["type"] = "string"
-                
-                # Copy description
-                if "description" in prop_def:
-                    prop_schema["description"] = prop_def["description"]
-                
-                # Handle array types - OpenAI requires 'items'
-                if prop_schema["type"] == "array":
-                    if "items" in prop_def:
-                        prop_schema["items"] = prop_def["items"]
-                    else:
-                        # Default to any type if items not specified
-                        prop_schema["items"] = {"type": "number"}
-                
-                # Handle other schema properties
-                for key in ["enum", "default", "minimum", "maximum", "pattern", "format"]:
-                    if key in prop_def:
-                        prop_schema[key] = prop_def[key]
-                
-                properties[prop_name] = prop_schema
+                # Recursively fix the schema to ensure OpenAI compatibility
+                properties[prop_name] = fix_schema_recursive(prop_def)
             
             required = schema.get("required", [])
     
