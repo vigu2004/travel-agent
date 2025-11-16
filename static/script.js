@@ -129,6 +129,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
             const data = await res.json();
             typingDiv.remove();
+            
+            // Show tool calls if any
+            if (data.tool_calls && data.tool_calls.length > 0) {
+                addToolCalls(data.tool_calls);
+            }
+            
             addMessage("assistant", data.message || data.error || "An error occurred");
         } catch (error) {
             typingDiv.remove();
@@ -165,6 +171,35 @@ document.addEventListener("DOMContentLoaded", () => {
         
         messageDiv.appendChild(contentDiv);
         chat.appendChild(messageDiv);
+        chat.scrollTop = chat.scrollHeight;
+    }
+
+    function addToolCalls(toolCalls) {
+        const chat = document.getElementById("chat-container");
+        
+        const toolDiv = document.createElement("div");
+        toolDiv.classList.add("message", "tool-calls");
+        
+        const contentDiv = document.createElement("div");
+        contentDiv.classList.add("message-content", "tool-calls-content");
+        
+        let toolsHtml = '<div class="tool-calls-header">🔧 Using MCP Tools:</div>';
+        
+        toolCalls.forEach((tool, index) => {
+            const argsStr = JSON.stringify(tool.arguments);
+            const shortArgs = argsStr.length > 50 ? argsStr.substring(0, 50) + '...' : argsStr;
+            
+            toolsHtml += `
+                <div class="tool-call-item">
+                    <span class="tool-name">${tool.name}</span>
+                    <span class="tool-args" title="${argsStr}">${shortArgs}</span>
+                </div>
+            `;
+        });
+        
+        contentDiv.innerHTML = toolsHtml;
+        toolDiv.appendChild(contentDiv);
+        chat.appendChild(toolDiv);
         chat.scrollTop = chat.scrollHeight;
     }
 

@@ -350,10 +350,19 @@ def chat():
 
     # 👉 If LLM triggers MCP tool
     if msg.tool_calls:
+        tool_calls_info = []
         results = []
+        
         for tool_call in msg.tool_calls:
             fname = tool_call.function.name
             args = json.loads(tool_call.function.arguments)
+            
+            # Track tool call for UI
+            tool_calls_info.append({
+                "name": fname,
+                "arguments": args
+            })
+            
             out = execute_function(fname, args, token)
             results.append({
                 "tool_call_id": tool_call.id,
@@ -369,7 +378,11 @@ def chat():
             model="gpt-4o-mini",
             messages=messages
         )
-        return jsonify({"message": second.choices[0].message.content})
+        
+        return jsonify({
+            "message": second.choices[0].message.content,
+            "tool_calls": tool_calls_info  # Include tool call info
+        })
 
     # No tool call
     return jsonify({"message": msg.content})
