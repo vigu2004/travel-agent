@@ -199,11 +199,35 @@ def convert_mcp_tool_to_openai(mcp_tool):
         schema = mcp_tool["inputSchema"]
         if schema.get("type") == "object" and "properties" in schema:
             for prop_name, prop_def in schema["properties"].items():
-                properties[prop_name] = {
-                    "type": prop_def.get("type", "string"),
-                    "description": prop_def.get("description", "")
-                }
-            required = schema.get( "required", [])
+                # Deep copy the property definition to preserve all schema details
+                prop_schema = {}
+                
+                # Copy type
+                if "type" in prop_def:
+                    prop_schema["type"] = prop_def["type"]
+                else:
+                    prop_schema["type"] = "string"
+                
+                # Copy description
+                if "description" in prop_def:
+                    prop_schema["description"] = prop_def["description"]
+                
+                # Handle array types - OpenAI requires 'items'
+                if prop_schema["type"] == "array":
+                    if "items" in prop_def:
+                        prop_schema["items"] = prop_def["items"]
+                    else:
+                        # Default to any type if items not specified
+                        prop_schema["items"] = {"type": "number"}
+                
+                # Handle other schema properties
+                for key in ["enum", "default", "minimum", "maximum", "pattern", "format"]:
+                    if key in prop_def:
+                        prop_schema[key] = prop_def[key]
+                
+                properties[prop_name] = prop_schema
+            
+            required = schema.get("required", [])
     
     return {
         "type": "function",
