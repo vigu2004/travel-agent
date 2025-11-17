@@ -99,6 +99,36 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // =============================
+    // TOOL STATUS DISPLAY
+    // =============================
+    function showToolStatus(tools) {
+        const container = document.getElementById("tool-status-container");
+        const list = document.getElementById("tool-status-list");
+        
+        list.innerHTML = "";
+        
+        tools.forEach(tool => {
+            const argsStr = JSON.stringify(tool.arguments);
+            const shortArgs = argsStr.length > 60 ? argsStr.substring(0, 60) + '...' : argsStr;
+            
+            const item = document.createElement("div");
+            item.classList.add("tool-status-item");
+            item.innerHTML = `
+                <span class="tool-status-item-name">${tool.name}</span>
+                <span class="tool-status-item-args" title="${argsStr}">${shortArgs}</span>
+            `;
+            list.appendChild(item);
+        });
+        
+        container.style.display = "block";
+    }
+    
+    function hideToolStatus() {
+        const container = document.getElementById("tool-status-container");
+        container.style.display = "none";
+    }
+
+    // =============================
     // CHAT
     // =============================
     async function sendMessage() {
@@ -132,10 +162,18 @@ document.addEventListener("DOMContentLoaded", () => {
             
             // Show tool calls if any
             if (data.tool_calls && data.tool_calls.length > 0) {
+                showToolStatus(data.tool_calls);
                 addToolCalls(data.tool_calls);
             }
             
             addMessage("assistant", data.message || data.error || "An error occurred");
+            
+            // Hide tool status after a delay
+            if (data.tool_calls && data.tool_calls.length > 0) {
+                setTimeout(() => {
+                    hideToolStatus();
+                }, 5000); // Hide after 5 seconds
+            }
         } catch (error) {
             typingDiv.remove();
             addMessage("assistant", "Error: " + error.message);

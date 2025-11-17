@@ -118,13 +118,17 @@ def auth_status():
 # MCP CLIENT HELPERS (Using Official MCP SDK)
 # ---------------------------------------------------------
 
-def call_mcp_tool(tool_name, args, token):
+def call_mcp_tool(tool_name, args, token, user_email=None):
     """Call MCP tool using official SDK"""
     async def _run():
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json, text/event-stream"
         }
+        
+        # Add user email if provided
+        if user_email:
+            headers["user-email"] = user_email
         
         async with streamablehttp_client(
             url=f"{MCP_SERVER_URL}/mcp",
@@ -154,13 +158,17 @@ def call_mcp_tool(tool_name, args, token):
     return asyncio.run(_run())
 
 
-def get_mcp_tools(token):
+def get_mcp_tools(token, user_email=None):
     """Get list of MCP tools using official SDK"""
     async def _run():
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json, text/event-stream"
         }
+        
+        # Add user email if provided
+        if user_email:
+            headers["user-email"] = user_email
         
         async with streamablehttp_client(
             url=f"{MCP_SERVER_URL}/mcp",
@@ -281,11 +289,11 @@ def convert_mcp_tool_to_openai(mcp_tool):
 _tool_cache = {}
 
 
-def get_openai_functions(token):
+def get_openai_functions(token, user_email=None):
     """Get OpenAI function definitions from MCP server"""
     if token not in _tool_cache:
         try:
-            mcp_tools = get_mcp_tools(token)
+            mcp_tools = get_mcp_tools(token, user_email)
             _tool_cache[token] = [convert_mcp_tool_to_openai(tool) for tool in mcp_tools]
         except Exception as e:
             print(f"Error fetching MCP tools: {e}")
@@ -306,10 +314,10 @@ def clear_tool_cache(token=None):
 # FUNCTION EXECUTION HANDLER
 # ---------------------------------------------------------
 
-def execute_function(name, args, token):
+def execute_function(name, args, token, user_email=None):
     """Execute MCP tool by name"""
     try:
-        result = call_mcp_tool(name, args, token)
+        result = call_mcp_tool(name, args, token, user_email)
         return result
     except Exception as e:
         return {"error": str(e)}
@@ -325,11 +333,14 @@ def chat():
     if not token:
         return jsonify({"error": "Not authenticated"}), 401
 
+    user = session.get("mcp_user", {})
+    user_email = user.get("email")
+
     data = request.json
     user_message = data.get("message")
 
     # Get tools from MCP server
-    openai_functions = get_openai_functions(token)
+    openai_functions = get_openai_functions(token, user_email)
     
     if not openai_functions:
         return jsonify({"error": "No tools available from MCP server"}), 500
@@ -363,7 +374,7 @@ def chat():
                 "arguments": args
             })
             
-            out = execute_function(fname, args, token)
+            out = execute_function(fname, args, token, user_email)
             results.append({
                 "tool_call_id": tool_call.id,
                 "role": "tool",
@@ -403,8 +414,11 @@ def capabilities():
     if not token:
         return jsonify({"capabilities": []})
     
+    user = session.get("mcp_user", {})
+    user_email = user.get("email")
+    
     try:
-        mcp_tools = get_mcp_tools(token)
+        mcp_tools = get_mcp_tools(token, user_email)
         capabilities_list = [
             {
                 "name": tool.get("name", ""),

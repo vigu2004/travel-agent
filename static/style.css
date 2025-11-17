@@ -413,6 +413,93 @@ body {
     30% { transform: translateY(-10px); }
 }
 
+/* Tool Status Container */
+.tool-status-container {
+    padding: 12px 24px;
+    background: #f0f9ff;
+    border-top: 1px solid #bae6fd;
+    animation: slideInUp 0.3s ease-out;
+}
+
+@keyframes slideInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.tool-status-content {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.tool-status-icon {
+    font-size: 20px;
+    animation: rotate 2s linear infinite;
+}
+
+@keyframes rotate {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.tool-status-text {
+    flex: 1;
+}
+
+.tool-status-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #0369a1;
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.tool-status-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.tool-status-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: white;
+    border-radius: 6px;
+    border: 1px solid #bae6fd;
+    font-size: 13px;
+    animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.tool-status-item-name {
+    font-weight: 600;
+    color: #0369a1;
+    font-family: 'Monaco', 'Courier New', monospace;
+}
+
+.tool-status-item-args {
+    color: #64748b;
+    font-family: 'Monaco', 'Courier New', monospace;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
 /* Input Container */
 .input-container {
     padding: 16px 24px;
